@@ -1,20 +1,115 @@
 """
-Chat test via OpenAI-compatible API (local LM Studio or public OpenAI).
-Uses GET /v1/models and POST /v1/chat/completions with streaming.
+Chat test: OpenAI-compatible for model list; LM Studio native API for chat when local
+(so thinking + response stream correctly). Only prints output after prompt processing.
 """
+import json
+import sys
+
+import requests
 from openai import OpenAI
 from openai import APIError, APIConnectionError
 
 
 # For local LM Studio: base without /v1, any placeholder API key
-# For OpenAI: use "https://api.openai.com", and set API_KEY to your key (or env OPENAI_API_KEY)
+# For OpenAI: use "https://api.openai.com", and set API_KEY to your key
 BASE_URL = "http://192.168.0.114:1234"
 API_KEY = "lm-studio"
 PROMPT = "Explain the hixbozon from particle physics in detail to a 5 year old"
 
 
-def stream_chat(client: OpenAI, model: str, prompt: str, max_tokens: int = 15000) -> None:
-    """Stream response using OpenAI-compatible chat completions (reasoning_content + content)."""
+def _is_lm_studio(base_url: str) -> bool:
+    """True if this is a local LM Studio (or similar) server, not public OpenAI."""
+    u = (base_url or "").strip().lower().rstrip("/")
+    if "api.openai.com" in u:
+        return False
+    return True
+
+
+def _server_base(base_url: str) -> str:
+    return base_url.rstrip("/").removesuffix("/v1")
+
+
+def stream_chat_native(
+    base_url: str, model: str, prompt: str, max_tokens: int = 15000
+) -> None:
+    """Stream via LM Studio native API. Thinking + response; print only after prompt processing."""
+    url = f"{_server_base(base_url)}/api/v1/chat"
+    payload = {
+        "model": model,
+        "input": prompt,
+        "stream": True,
+        "max_output_tokens": max_tokens,
+    }
+    resp = requests.post(url, json=payload, stream=True, timeout=360)
+    resp.raise_for_status()
+    resp.encoding = "utf-8"
+
+    event_type = None
+    prompt_done = False
+    thinking_started = False
+    response_started = False
+    for line in resp.iter_lines(decode_unicode=True):
+        if line is None:
+            continue
+        if line.startswith("event:"):
+            event_type = line[6:].strip()
+            continue
+        if line.startswith("data:"):
+            data_str = line[5:].strip()
+            if data_str == "[DONE]" or not data_str:
+                continue
+            try:
+                data = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(data, dict):
+                event_type = None
+                continue
+            chunk_type = data.get("type") or event_type
+            if chunk_type == "prompt_processing.end":
+                prompt_done = True
+            if not prompt_done:
+                event_type = None
+                continue
+            if chunk_type == "reasoning.delta":
+                content = data.get("content")
+                if content:
+                    if not thinking_started:
+                        print("--- Thinking ---")
+                        thinking_started = True
+                    print(content, end="", flush=True)
+            elif chunk_type == "message.delta":
+                content = data.get("content")
+                if content:
+                    if not response_started:
+                        if thinking_started:
+                            print("\n", end="")
+                        print("--- Response ---")
+                        response_started = True
+                    print(content, end="", flush=True)
+            elif chunk_type == "chat.end":
+                result = data.get("result") or data
+                output = result.get("output") if isinstance(result, dict) else []
+                if isinstance(output, list):
+                    for item in output:
+                        if isinstance(item, dict) and item.get("type") == "message":
+                            msg_content = item.get("content")
+                            if msg_content and not response_started:
+                                if thinking_started:
+                                    print("\n", end="")
+                                print("--- Response ---")
+                                response_started = True
+                            if msg_content:
+                                print(msg_content, end="", flush=True)
+            event_type = None
+    if response_started or thinking_started:
+        print("\n---")
+
+
+def stream_chat_openai(
+    client: OpenAI, model: str, prompt: str, max_tokens: int = 15000
+) -> None:
+    """Stream via OpenAI-compatible API (thinking only if server sends reasoning_content)."""
     stream = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
@@ -46,6 +141,9 @@ def stream_chat(client: OpenAI, model: str, prompt: str, max_tokens: int = 15000
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
     base_url = BASE_URL.rstrip("/")
     if not base_url.endswith("/v1"):
         base_url = f"{base_url}/v1"
@@ -62,14 +160,19 @@ def main():
         print("Available models:", model_ids)
         model = model_ids[0]
 
-        # 2. Send prompt and stream result (OpenAI-compatible)
+        # 2. Send prompt and stream result
         print("\nSending prompt...")
-        stream_chat(client, model, PROMPT, max_tokens=15000)
+        if _is_lm_studio(BASE_URL):
+            stream_chat_native(BASE_URL, model, PROMPT, max_tokens=15000)
+        else:
+            stream_chat_openai(client, model, PROMPT, max_tokens=15000)
 
     except APIConnectionError as e:
         print(f"Connection error: {e}. Check {BASE_URL} or API key.")
     except APIError as e:
         print(f"API error: {e}")
+    except requests.RequestException as e:
+        print(f"Request error: {e}")
 
 
 if __name__ == "__main__":
