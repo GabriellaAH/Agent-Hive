@@ -3,18 +3,39 @@ Chat test: OpenAI-compatible for model list; LM Studio native API for chat when 
 (so thinking + response stream correctly). Only prints output after prompt processing.
 """
 import json
+import os
 import sys
 
 import requests
-from openai import OpenAI
-from openai import APIError, APIConnectionError
+from dotenv import load_dotenv
+from openai import APIConnectionError, APIError, OpenAI
 
+load_dotenv()
+
+from hive_env import clear_hive_env_cache, get_hive_env
+
+clear_hive_env_cache()
+_he = get_hive_env()
 
 # For local LM Studio: base without /v1, any placeholder API key
-# For OpenAI: use "https://api.openai.com", and set API_KEY to your key
-BASE_URL = "http://192.168.0.114:1234"
-API_KEY = "lm-studio"
-PROMPT = "Explain the hixbozon from particle physics in detail to a 5 year old"
+# For OpenAI: use "https://api.openai.com/v1" base and set HIVE_API_KEY
+BASE_URL = (
+    os.environ.get("HIVE_BASE_URL", "").strip()
+    or os.environ.get("TEST_BASE_URL", "").strip()
+    or _he.base_url
+)
+API_KEY = (
+    os.environ.get("HIVE_API_KEY", "").strip()
+    or os.environ.get("TEST_API_KEY", "").strip()
+    or _he.api_key
+)
+MODEL_OVERRIDE = (os.environ.get("HIVE_MODEL") or os.environ.get("TEST_MODEL") or "").strip()
+PROMPT = (
+    os.environ.get("HIVE_TEST_PROMPT", "").strip()
+    or os.environ.get("TEST_PROMPT", "").strip()
+    or _he.test_prompt
+    or "Say hello in one sentence."
+)
 
 
 def _is_lm_studio(base_url: str) -> bool:
@@ -30,7 +51,7 @@ def _server_base(base_url: str) -> str:
 
 
 def stream_chat_native(
-    base_url: str, model: str, prompt: str, max_tokens: int = 15000
+    base_url: str, model: str, prompt: str, max_tokens: int = 15000, timeout: float = 360.0
 ) -> None:
     """Stream via LM Studio native API. Thinking + response; print only after prompt processing."""
     url = f"{_server_base(base_url)}/api/v1/chat"
@@ -40,7 +61,7 @@ def stream_chat_native(
         "stream": True,
         "max_output_tokens": max_tokens,
     }
-    resp = requests.post(url, json=payload, stream=True, timeout=360)
+    resp = requests.post(url, json=payload, stream=True, timeout=timeout)
     resp.raise_for_status()
     resp.encoding = "utf-8"
 
@@ -150,7 +171,6 @@ def main():
     client = OpenAI(base_url=base_url, api_key=API_KEY)
 
     try:
-        # 1. List models (GET /v1/models)
         print("Fetching models...")
         models = client.models.list()
         model_ids = [m.id for m in models.data]
@@ -158,14 +178,17 @@ def main():
             print("No models found. Load a model (or check API key for OpenAI).")
             return
         print("Available models:", model_ids)
-        model = model_ids[0]
+        model = MODEL_OVERRIDE if MODEL_OVERRIDE in model_ids else model_ids[0]
+        if MODEL_OVERRIDE and MODEL_OVERRIDE not in model_ids:
+            print(f"HIVE_MODEL/TEST_MODEL {MODEL_OVERRIDE!r} not in list; using {model!r}.")
 
-        # 2. Send prompt and stream result
         print("\nSending prompt...")
+        timeout = float(os.environ.get("HIVE_HTTP_TIMEOUT_SEC", "360"))
+        max_tok = int(os.environ.get("HIVE_MAX_TOKENS", "15000"))
         if _is_lm_studio(BASE_URL):
-            stream_chat_native(BASE_URL, model, PROMPT, max_tokens=15000)
+            stream_chat_native(BASE_URL, model, PROMPT, max_tokens=max_tok, timeout=timeout)
         else:
-            stream_chat_openai(client, model, PROMPT, max_tokens=15000)
+            stream_chat_openai(client, model, PROMPT, max_tokens=max_tok)
 
     except APIConnectionError as e:
         print(f"Connection error: {e}. Check {BASE_URL} or API key.")
