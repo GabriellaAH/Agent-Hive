@@ -49,7 +49,7 @@ Configuration is driven by **environment variables** (typically via a `.env` fil
 ## Install
 
 ```bash
-git clone <YOUR_REPO_URL>
+git clone https://github.com/GabriellaAH/Agent-Hive.git
 cd Agent-Hive
 
 python -m venv .venv
